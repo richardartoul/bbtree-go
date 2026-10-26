@@ -1,7 +1,8 @@
 package bbtree
 
 // The portable search is also the reference for architecture-specific paths.
-// Go does not autovectorize this loop; amd64 supplies an SSE2 implementation.
+// Go does not autovectorize this loop; amd64 supplies SSE2 and AVX-512
+// implementations, and arm64 a NEON one.
 func scalarBounds(keys *[capacity]uint16, target uint16) (lo, hi int) {
 	for lo < capacity && keys[lo] < target {
 		lo++
