@@ -211,7 +211,8 @@ func fuzzOperations[K bbtree.Key](t *testing.T, data []byte, key func(uint16) K)
 	for i := range keys {
 		keys[i] = key(uint16(i))
 	}
-	for _, m := range []orderedMap[K]{new(bbtree.Map[K, int64]), new(bbtree.ConcurrentMap[K, int64])} {
+	for _, m := range []hintedOrderedMap[K]{new(bbtree.Map[K, int64]), new(bbtree.ConcurrentMap[K, int64])} {
+		var hint bbtree.Hint[K, int64]
 		want := make(map[K]int64)
 		for step := 0; step+3 < len(data); step += 4 {
 			op, a, b, c := data[step], data[step+1], data[step+2], data[step+3]
@@ -220,7 +221,7 @@ func fuzzOperations[K bbtree.Key](t *testing.T, data []byte, key func(uint16) K)
 			w, exists := want[k]
 			switch op % 9 {
 			case 0, 1:
-				old, ok := m.Set(k, value)
+				old, ok := m.SetHint(k, value, &hint)
 				if old != w || ok != exists {
 					t.Fatalf("step %d Set: (%d,%v), want (%d,%v)", step, old, ok, w, exists)
 				}
@@ -234,13 +235,13 @@ func fuzzOperations[K bbtree.Key](t *testing.T, data []byte, key func(uint16) K)
 			case 3, 4:
 				for j := 0; j <= int(c)%64; j++ {
 					q := keys[(index+j)%len(keys)]
-					old, ok := m.Get(q)
+					old, ok := m.GetHint(q, &hint)
 					w, exists := want[q]
 					if old != w || ok != exists {
 						t.Fatalf("step %d run Get(%v): (%d,%v), want (%d,%v)", step, q, old, ok, w, exists)
 					}
 					if op%9 == 3 {
-						old, ok = m.Set(q, value+int64(j))
+						old, ok = m.SetHint(q, value+int64(j), &hint)
 						want[q] = value + int64(j)
 					} else {
 						old, ok = m.Delete(q)

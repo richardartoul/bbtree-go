@@ -97,6 +97,11 @@ func (m *ConcurrentMap[K, V]) Set(key K, value V) (V, bool) {
 		}
 		n.leaf.mu.Unlock()
 	}
+	return m.setSplit(p, value)
+}
+
+// setSplit rechecks the destination and inserts under the structure mutex.
+func (m *ConcurrentMap[K, V]) setSplit(p probe[K], value V) (V, bool) {
 	// Re-descend after taking the split mutex: another splitter may have
 	// changed both the root and the destination while we were waiting.
 	m.structure.Lock()

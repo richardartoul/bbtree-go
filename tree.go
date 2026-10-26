@@ -568,6 +568,11 @@ func (m *Map[K, V]) Set(key K, value V) (V, bool) {
 		var zero V
 		return zero, false
 	}
+	return m.setSplit(p, value)
+}
+
+// setSplit propagates an insertion that could not fit in its destination leaf.
+func (m *Map[K, V]) setSplit(p probe[K], value V) (V, bool) {
 	// Only a full leaf needs the recursive path that propagates splits.
 	old, replaced, right, sep := insert(m.root, p, value, fences[K]{})
 	if right != nil {
