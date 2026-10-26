@@ -103,6 +103,21 @@ func testHintInvalidation[K bbtree.Key](t *testing.T, key func(int) K) {
 			m.Set(key(i*8), int64(i))
 		}
 		m.GetHint(key(100*8), &hint)
+		staleWrite := hint
+		// These local splits shrink the saved leaf's upper bound without
+		// growing the root. A cached upper bound must not authorize access.
+		for i := 769; i < 1024; i++ {
+			m.Set(key(i), int64(i)+99)
+		}
+		if v, ok := m.GetHint(key(800), &hint); !ok || v != 899 {
+			t.Fatalf("%T stale upper-bound read: (%d,%v)", m, v, ok)
+		}
+		if v, ok := m.SetHint(key(1000), 777, &staleWrite); !ok || v != 1099 {
+			t.Fatalf("%T stale upper-bound write: (%d,%v)", m, v, ok)
+		}
+		if v, ok := m.Get(key(1000)); !ok || v != 777 {
+			t.Fatalf("%T stale write missed destination: (%d,%v)", m, v, ok)
+		}
 		// Keep the hint untouched while ordinary writes split its leaf and
 		// change routing/prefix metadata. Check both sides of the old minimum.
 		for i := 0; i < 32768; i++ {

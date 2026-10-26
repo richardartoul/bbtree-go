@@ -10,27 +10,35 @@ package bbtree
 // removed by Clear or Compact, until reused or Reset. Reset hints when finished
 // with them if their lifetime exceeds the map's.
 type Hint[K Key, V any] struct {
-	root *node[K, V]
-	leaf *node[K, V]
-	low  K
+	root    *node[K, V]
+	leaf    *node[K, V]
+	low     K
+	high    K
+	hasHigh bool
 }
 
 // Reset forgets the cached leaf and releases the hint's references.
 func (h *Hint[K, V]) Reset() { *h = Hint[K, V]{} }
 
 // remember requires exclusive ownership of the map or a lock on n's leaf.
-// The current minimum is a conservative lower fence: deletion and insertion
-// cannot move the leaf's routing interval above it. Splits can lower the upper
-// fence, so every hinted operation checks the live high fence, not a cached one.
-func (h *Hint[K, V]) remember(root, n *node[K, V]) {
-	h.root, h.leaf = root, n
-	var zero K
-	h.low = zero
+// The anchor is a conservative lower fence: it is a key from this leaf, and
+// splits reset it before shrinking the interval. Deletion and insertion can
+// make it stale but cannot move it below the leaf's routing interval. The saved
+// upper bound only rejects misses without accessing the leaf; accepting a hint
+// still requires checking the live high fence.
+// Only concurrent numeric paths cache the upper bound: string comparisons are
+// too expensive to repeat before and after locking.
+func (h *Hint[K, V]) remember(root, n *node[K, V], cacheHigh bool) {
 	if n == nil || n.count == 0 {
-		h.leaf = nil
+		*h = Hint[K, V]{root: root}
 		return
 	}
-	h.low = n.entries()[0].key
+	h.root, h.leaf = root, n
+	h.low = n.anchor
+	h.hasHigh = cacheHigh && n.leaf.hasHigh
+	if h.hasHigh {
+		h.high = n.leaf.high
+	}
 }
 
 // GetHint is Get with a caller-owned leaf hint. A nil hint is equivalent to Get.
@@ -42,9 +50,14 @@ func (m *Map[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	n := hint.leaf
 	if hint.root != m.root || n == nil || key < hint.low || n.leaf.hasHigh && key >= n.leaf.high {
 		n, lo, hi := m.seek(probeOf(key))
-		hint.remember(m.root, n)
-		if n != nil {
-			return n.candidates(key, lo, hi)
+		hint.remember(m.root, n, false)
+		if lo < hi {
+			if hi-lo > 1 {
+				return n.collision(key, lo, hi)
+			}
+			if e := &n.entries()[lo]; e.key == key {
+				return e.value, true
+			}
 		}
 		var zero V
 		return zero, false
@@ -68,7 +81,7 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 	}
 	if m.root == nil {
 		old, replaced := m.Set(key, value)
-		hint.remember(m.root, m.root)
+		hint.remember(m.root, m.root, false)
 		return old, replaced
 	}
 	p := probeOf(key)
@@ -83,7 +96,8 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		return zero, false
 	}
 	var lo, hi int
-	if hint.root == m.root && n != nil && key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high) {
+	cached := hint.root == m.root && n != nil && key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high)
+	if cached {
 		lo, hi = n.bounds(p)
 	} else {
 		n, lo, hi = m.seek(p)
@@ -92,18 +106,22 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 	if i < hi && n.entries()[i].key == key {
 		old := n.entries()[i].value
 		n.entries()[i].value = value
-		hint.remember(m.root, n)
+		if !cached {
+			hint.remember(m.root, n, false)
+		}
 		return old, true
 	}
 	if n.count < capacity {
 		n.put(i, p, value)
 		m.len++
-		hint.remember(m.root, n)
+		if !cached {
+			hint.remember(m.root, n, false)
+		}
 		var zero V
 		return zero, false
 	}
 	old, replaced := m.setSplit(p, value)
-	hint.remember(m.root, descend(m.root, p))
+	hint.remember(m.root, descend(m.root, p), false)
 	return old, replaced
 }
 
@@ -118,7 +136,7 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	p := probe[K]{key, bits, numeric}
 	root := m.root.Load()
 	n := hint.leaf
-	if hint.root == root && n != nil && key >= hint.low {
+	if hint.root == root && n != nil && key >= hint.low && (!hint.hasHigh || key < hint.high) {
 		n.leaf.mu.RLock()
 		if n.leaf.hasHigh && key >= n.leaf.high {
 			n.leaf.mu.RUnlock()
@@ -129,7 +147,7 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	}
 	if n == nil {
 		n = readLeaf(descend(root, p), key)
-		hint.remember(root, n)
+		hint.remember(root, n, numeric)
 	}
 	if n != nil {
 		var value V
@@ -158,11 +176,13 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 	p := probeOf(key)
 	root := m.root.Load()
 	n := hint.leaf
-	if hint.root == root && n != nil && key >= hint.low {
+	cached := hint.root == root && n != nil && key >= hint.low && (!hint.hasHigh || key < hint.high)
+	if cached {
 		leafOf(n).mu.Lock()
 		if n.leaf.hasHigh && key >= n.leaf.high {
 			n.leaf.mu.Unlock()
 			n = nil
+			cached = false
 		}
 	} else {
 		n = nil
@@ -176,13 +196,17 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 		if i < hi && n.entries()[i].key == key {
 			old := n.entries()[i].value
 			n.entries()[i].value = value
-			hint.remember(root, n)
+			if !cached {
+				hint.remember(root, n, p.numeric)
+			}
 			n.leaf.mu.Unlock()
 			return old, true
 		}
 		if n.count < capacity {
 			n.put(i, p, value)
-			hint.remember(root, n)
+			if !cached {
+				hint.remember(root, n, p.numeric)
+			}
 			n.leaf.mu.Unlock()
 			var zero V
 			return zero, false
@@ -192,7 +216,7 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 	old, replaced := m.setSplit(p, value)
 	root = m.root.Load()
 	n = readLeaf(descend(root, p), key)
-	hint.remember(root, n)
+	hint.remember(root, n, p.numeric)
 	if n != nil {
 		n.leaf.mu.RUnlock()
 	}
