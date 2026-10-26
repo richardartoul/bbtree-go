@@ -33,6 +33,10 @@ type node[K Key, V any] struct {
 	leaf   *leaf[K, V]
 	header
 	anchor K
+	// On 64-bit Go, small scanned allocations have an eight-byte type
+	// header. Keep eight-byte numeric key/value pairs on one cache line
+	// without shifting the already-aligned numeric window column.
+	_ [8]byte
 }
 
 // header holds the routing fields. It is not generic, so go_asm.h defines
@@ -213,10 +217,10 @@ func ordered[K Key](key K) (uint64, bool) {
 
 // numericBits returns a numeric key's ordered encoding and its raw word.
 func numericBits[K Key](key K) (bits, raw uint64, ok bool) {
-	switch k := any(key).(type) {
-	case uint64:
+	if k, ok := any(key).(uint64); ok {
 		return k, k, true
-	case int64:
+	}
+	if k, ok := any(key).(int64); ok {
 		return uint64(k) ^ (1 << 63), uint64(k), true
 	}
 	return 0, 0, false
@@ -553,7 +557,7 @@ func (m *Map[K, V]) Set(key K, value V) (V, bool) {
 	}
 	n, lo, hi := m.seek(p)
 	i := n.narrow(key, lo, hi)
-	if i < n.count && n.entries()[i].key == key {
+	if i < hi && n.entries()[i].key == key {
 		old := n.entries()[i].value
 		n.entries()[i].value = value
 		return old, true
@@ -591,8 +595,9 @@ func newRoot[K Key, V any](left, right *node[K, V], sep K) *node[K, V] {
 func insert[K Key, V any](n *node[K, V], p probe[K], value V, f fences[K]) (old V, replaced bool, right *node[K, V], sep K) {
 	key := p.key
 	if n.branch == nil {
-		i := n.lower(p)
-		if i < n.count && n.entries()[i].key == key {
+		lo, hi := n.bounds(p)
+		i := n.narrow(key, lo, hi)
+		if i < hi && n.entries()[i].key == key {
 			old, n.entries()[i].value = n.entries()[i].value, value
 			return old, true, nil, sep
 		}

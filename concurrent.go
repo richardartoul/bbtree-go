@@ -80,8 +80,10 @@ func (m *ConcurrentMap[K, V]) Set(key K, value V) (V, bool) {
 	p := probeOf(key)
 	n := writeLeaf(descend(m.root.Load(), p), key)
 	if n != nil {
-		i := n.lower(p)
-		if i < n.count && n.entries()[i].key == key {
+		// An empty matching-window range proves absence without reading an entry.
+		lo, hi := n.bounds(p)
+		i := n.narrow(key, lo, hi)
+		if i < hi && n.entries()[i].key == key {
 			old := n.entries()[i].value
 			n.entries()[i].value = value
 			n.leaf.mu.Unlock()
