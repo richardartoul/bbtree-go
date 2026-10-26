@@ -1,5 +1,7 @@
 **THIS IS JUST A GO TRANSLATION OF THE [ORIGINAL RUST IMPLEMENTATION, XIANGPENGHAO/BBTREE](https://github.com/XiangpengHao/bbtree).**
 
+Node searches and numeric descents use AVX-512 (or SSE2) on amd64 and NEON on arm64, including Apple Silicon. Other architectures, and builds with the `purego` tag, use portable Go.
+
 | Keys | Map | Operation | Workers | Entries | Go ns/op (median of 6) | Rust ns/op (median of 6) | Median paired Go/Rust |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | uint64 | single | insert | 1 | 1,048,576 | 198.8 | 177.1 | 1.13× |

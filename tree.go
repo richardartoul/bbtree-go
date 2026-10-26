@@ -76,7 +76,8 @@ type branch[K Key, V any] struct {
 // childAt loads child i. A ConcurrentMap splitter replaces a published child
 // in place with publishChild, so lock-free readers load children atomically.
 // The assembly descents' aligned 8-byte loads of children are the same
-// atomic, acquire-ordered loads on amd64.
+// atomic, acquire-ordered loads on amd64. On arm64 they are plain loads, but
+// every later load through a child depends on its address, which orders it.
 func (b *branch[K, V]) childAt(i int) *node[K, V] {
 	return (*node[K, V])(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&b.children[i]))))
 }
