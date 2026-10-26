@@ -128,17 +128,7 @@ func word[K Key](key K, offset int) uint32 {
 		return uint32(u<<(8*uint(offset))>>48) << 16
 	}
 	if k, ok := any(key).(string); ok {
-		if offset+4 <= len(k) {
-			return binary.BigEndian.Uint32([]byte(k[offset : offset+4]))
-		}
-		var w uint32
-		for i := offset; i < offset+4; i++ {
-			w <<= 8
-			if i < len(k) {
-				w |= uint32(k[i])
-			}
-		}
-		return w
+		return window4(k, offset)
 	}
 	return 0
 }
@@ -263,10 +253,14 @@ func (n *node[K, V]) textBounds(key K) (int, int) {
 	if n.count == 0 {
 		return 0, 0
 	}
+	k, ok := any(key).(string)
+	if !ok {
+		// Named keys use zero windows and full comparisons to resolve ties.
+		return wideBounds(&n.inline, &n.inlineLow, 0, n.count)
+	}
 	if n.prefix > n.fence {
-		k, _ := any(key).(string)
 		base := max(n.fence, n.prefix-8)
-		if base > n.fence && !matchesPrefix(n.anchor, key, n.fence, base) {
+		if base > n.fence && !matchesPrefix(any(n.anchor).(string), k, n.fence, base) {
 			if key < n.anchor {
 				return 0, 0
 			}
@@ -281,14 +275,27 @@ func (n *node[K, V]) textBounds(key K) (int, int) {
 			return n.count, n.count
 		}
 	}
-	return wideBounds(&n.inline, &n.inlineLow, word(key, n.prefix), n.count)
+	return wideBounds(&n.inline, &n.inlineLow, window4(k, n.prefix), n.count)
 }
 
 // matchesPrefix reports whether string key has anchor's bytes [from, to).
-func matchesPrefix[K Key](anchor, key K, from, to int) bool {
-	a, _ := any(anchor).(string)
-	k, _ := any(key).(string)
-	return len(k) >= to && a[from:to] == k[from:to]
+func matchesPrefix(anchor, key string, from, to int) bool {
+	return len(key) >= to && anchor[from:to] == key[from:to]
+}
+
+// window4 returns four zero-padded big-endian bytes of s at offset.
+func window4(s string, offset int) uint32 {
+	if offset+4 <= len(s) {
+		return binary.BigEndian.Uint32([]byte(s[offset : offset+4]))
+	}
+	var w uint32
+	for i := offset; i < offset+4; i++ {
+		w <<= 8
+		if i < len(s) {
+			w |= uint32(s[i])
+		}
+	}
+	return w
 }
 
 // window8 returns eight zero-padded big-endian bytes of s at offset.
@@ -630,7 +637,7 @@ func (n *node[K, V]) shares(p probe[K]) bool {
 	}
 	k, _ := any(p.key).(string)
 	base := max(n.fence, n.prefix-8)
-	return len(k) >= n.prefix && (base == n.fence || matchesPrefix(n.anchor, p.key, n.fence, base)) &&
+	return len(k) >= n.prefix && (base == n.fence || matchesPrefix(any(n.anchor).(string), k, n.fence, base)) &&
 		(window8(k, base)^n.low)&n.mask == 0
 }
 
