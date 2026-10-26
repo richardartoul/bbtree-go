@@ -13,6 +13,7 @@ import (
 // keys. Clustered streams change their 64-key neighborhood every 256 requests;
 // repeated streams change their single key at the same frequency. Concurrent
 // maps use one worker here to isolate routing savings from lock contention.
+// Changing streams alternate random and clustered phases every 1024 requests.
 func BenchmarkHints(b *testing.B) {
 	b.Run("uint64", func(b *testing.B) { benchmarkHints(b, func(i int) uint64 { return uint64(i) }) })
 	b.Run("string", func(b *testing.B) {
@@ -38,7 +39,7 @@ func benchmarkHints[K bbtree.Key](b *testing.B, key func(int) K) {
 			for _, i := range rng.Perm(entries) {
 				set(keys[i], uint64(i)+1)
 			}
-			for _, locality := range []string{"random", "clustered", "repeated"} {
+			for _, locality := range []string{"random", "clustered", "repeated", "changing"} {
 				b.Run(locality, func(b *testing.B) {
 					width := entries
 					if locality == "clustered" {
@@ -50,6 +51,12 @@ func benchmarkHints[K bbtree.Key](b *testing.B, key func(int) K) {
 					rng := rand.New(rand.NewPCG(32, 19))
 					base := 0
 					for i := range probes {
+						if locality == "changing" {
+							width = entries
+							if i/1024%2 != 0 {
+								width = 64
+							}
+						}
 						if i%256 == 0 {
 							base = rng.IntN(entries - width + 1)
 						}
