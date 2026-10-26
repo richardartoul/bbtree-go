@@ -45,14 +45,10 @@ TEXT ·columnBounds(SB), NOSPLIT, $0-40
 	VPCMPUW $0, Z0, Z1, K2
 	VPCMPUW $1, Z0, Z2, K3
 	VPCMPUW $0, Z0, Z2, K4
-	KMOVD K1, DX
-	KMOVD K2, CX
-	KMOVD K3, R9
-	KMOVD K4, R10
-	SHLQ $32, R9
-	SHLQ $32, R10
-	ORQ R9, DX
-	ORQ R10, CX
+	KUNPCKDQ K1, K3, K1
+	KUNPCKDQ K2, K4, K2
+	KMOVQ K1, DX
+	KMOVQ K2, CX
 	BZHIQ R8, DX, DX
 	BZHIQ R8, CX, CX
 	POPCNTQ DX, DX
@@ -136,10 +132,8 @@ TEXT ·columnBounds32(SB), NOSPLIT, $0-48
 	VPCMPUW $0, Z0, Z1, K1
 	VPCMPUW $1, Z0, Z1, K2
 	VPCMPUW $1, Z5, Z2, K1, K3
-	VPCMPUW $0, Z5, Z2, K1, K4
-	KORD K3, K2, K2
-	KMOVD K2, SI
-	KMOVD K4, CX
+	VPCMPUW $0, Z5, Z2, K1, K6
+	KORD K3, K2, K5
 	VMOVDQU16 64(AX), Z1
 	VMOVDQU16 64(DX), Z2
 	VPCMPUW $0, Z0, Z1, K1
@@ -147,12 +141,10 @@ TEXT ·columnBounds32(SB), NOSPLIT, $0-48
 	VPCMPUW $1, Z5, Z2, K1, K3
 	VPCMPUW $0, Z5, Z2, K1, K4
 	KORD K3, K2, K2
-	KMOVD K2, R9
-	KMOVD K4, R10
-	SHLQ $32, R9
-	SHLQ $32, R10
-	ORQ R9, SI
-	ORQ R10, CX
+	KUNPCKDQ K5, K2, K2
+	KUNPCKDQ K6, K4, K4
+	KMOVQ K2, SI
+	KMOVQ K4, CX
 	BZHIQ R8, SI, SI
 	BZHIQ R8, CX, CX
 	POPCNTQ SI, SI
@@ -271,6 +263,7 @@ loop:
 	BZHIQ R8, SI, SI
 
 TEXT ·descendBits(SB), NOSPLIT, $0-49
+	PCALIGN $64
 	MOVQ h+0(FP), AX
 	MOVQ bits+8(FP), BX
 	MOVQ $0, lo+32(FP)
@@ -487,6 +480,7 @@ batchnext:
 // The separators start BRANCH_KEYS bytes into the branch; TestNodeLayout
 // checks this. The function has no safe points.
 TEXT ·getBits(SB), NOSPLIT, $0-48
+	PCALIGN $64
 	MOVQ h+0(FP), AX
 	MOVQ bits+8(FP), BX
 	MOVQ $0, entry+40(FP)
