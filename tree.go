@@ -556,11 +556,18 @@ func (m *Map[K, V]) Set(key K, value V) (V, bool) {
 		return zero, false
 	}
 	n, lo, hi := m.seek(p)
-	i := n.narrow(key, lo, hi)
+	// A single matching window needs equality, not a binary search.
+	i := lo
+	if hi-lo > 1 {
+		i = n.narrow(key, lo, hi)
+	}
 	if i < hi && n.entries()[i].key == key {
 		old := n.entries()[i].value
 		n.entries()[i].value = value
 		return old, true
+	}
+	if hi-lo == 1 && n.entries()[i].key < key {
+		i++
 	}
 	if n.count < capacity {
 		n.put(i, p, value)

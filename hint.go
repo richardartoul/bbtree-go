@@ -124,7 +124,10 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		}
 		n, lo, hi = m.seek(p)
 	}
-	i := n.narrow(key, lo, hi)
+	i := lo
+	if hi-lo > 1 {
+		i = n.narrow(key, lo, hi)
+	}
 	if i < hi && n.entries()[i].key == key {
 		old := n.entries()[i].value
 		n.entries()[i].value = value
@@ -132,6 +135,9 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 			hint.remember(m.root, n, false)
 		}
 		return old, true
+	}
+	if hi-lo == 1 && n.entries()[i].key < key {
+		i++
 	}
 	if n.count < capacity {
 		n.put(i, p, value)
@@ -225,7 +231,10 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 	}
 	if n != nil {
 		lo, hi := n.bounds(p)
-		i := n.narrow(key, lo, hi)
+		i := lo
+		if hi-lo > 1 {
+			i = n.narrow(key, lo, hi)
+		}
 		if i < hi && n.entries()[i].key == key {
 			old := n.entries()[i].value
 			n.entries()[i].value = value
@@ -234,6 +243,9 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 			}
 			n.leaf.mu.Unlock()
 			return old, true
+		}
+		if hi-lo == 1 && n.entries()[i].key < key {
+			i++
 		}
 		if n.count < capacity {
 			n.put(i, p, value)

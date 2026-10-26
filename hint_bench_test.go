@@ -3,6 +3,7 @@ package bbtree_test
 import (
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -83,6 +84,8 @@ func benchmarkHints[K bbtree.Key](b *testing.B, key func(int) K) {
 										set = func(k K, v uint64) (uint64, bool) { return c.SetHint(k, v, &hint) }
 									}
 								}
+								// Finish construction's GC before measuring allocation-free operations.
+								runtime.GC()
 								i := 0
 								var sum, want uint64
 								b.ReportAllocs()

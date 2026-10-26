@@ -39,6 +39,49 @@ func (m hintedView[K]) Set(key K, value int64) (int64, bool) {
 	return m.SetHint(key, value, m.hint)
 }
 
+func TestSetWindowTies(t *testing.T) {
+	testSetWindowTies(t, []uint64{0x120010, 0x130000}, []uint64{0x12000f, 0x120011})
+	testSetWindowTies(t, []int64{-0x130010, -0x120000}, []int64{-0x130011, -0x13000f})
+	testSetWindowTies(t, []string{"aaaaM", "baaaa"}, []string{"aaaaL", "aaaaN"})
+}
+
+func testSetWindowTies[K bbtree.Key](t *testing.T, stored, queries []K) {
+	t.Helper()
+	for _, key := range queries {
+		for _, concurrent := range []bool{false, true} {
+			for _, hinted := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%T/%v/concurrent=%t/hint=%t", key, key, concurrent, hinted), func(t *testing.T) {
+					var m hintedOrderedMap[K] = new(bbtree.Map[K, int64])
+					if concurrent {
+						m = new(bbtree.ConcurrentMap[K, int64])
+					}
+					want := make(map[K]int64)
+					for i, k := range stored {
+						m.Set(k, int64(i)+10)
+						want[k] = int64(i) + 10
+					}
+					var hint bbtree.Hint[K, int64]
+					set := m.Set
+					if hinted {
+						m.GetHint(stored[0], &hint)
+						set = func(k K, v int64) (int64, bool) { return m.SetHint(k, v, &hint) }
+					}
+					// The absent key shares a window with exactly one entry.
+					// Its full key can sort before or after that candidate.
+					if old, ok := set(key, 70); ok || old != 0 {
+						t.Fatalf("insert: (%d,%v)", old, ok)
+					}
+					if old, ok := set(key, 90); !ok || old != 70 {
+						t.Fatalf("replace: (%d,%v)", old, ok)
+					}
+					want[key] = 90
+					checkParity(t, m, want, append(append([]K{}, stored...), queries...))
+				})
+			}
+		}
+	}
+}
+
 func TestHintedMaps(t *testing.T) {
 	numeric := []int64{math.MinInt64, math.MinInt64 + 1, -1, 0, 1, math.MaxInt64}
 	text := []string{"", "\x00", "a", "a\x00", "a\x00\x00", "\xff"}

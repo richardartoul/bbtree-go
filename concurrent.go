@@ -82,12 +82,18 @@ func (m *ConcurrentMap[K, V]) Set(key K, value V) (V, bool) {
 	if n != nil {
 		// An empty matching-window range proves absence without reading an entry.
 		lo, hi := n.bounds(p)
-		i := n.narrow(key, lo, hi)
+		i := lo
+		if hi-lo > 1 {
+			i = n.narrow(key, lo, hi)
+		}
 		if i < hi && n.entries()[i].key == key {
 			old := n.entries()[i].value
 			n.entries()[i].value = value
 			n.leaf.mu.Unlock()
 			return old, true
+		}
+		if hi-lo == 1 && n.entries()[i].key < key {
+			i++
 		}
 		if n.count < capacity {
 			n.put(i, p, value)
