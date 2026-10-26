@@ -34,9 +34,9 @@ func TestNodeLayout(t *testing.T) {
 	}
 }
 
-// TestDescendBits checks every exit of the assembly descents against route
-// and bounds: leaves with and without search, window collisions at internal
-// nodes, and keys outside a node's prefix. getBits must find exactly the
+// TestDescendBits checks the assembly descents against route and bounds:
+// leaves with and without search, window collisions at internal nodes,
+// and keys outside a node's prefix. getBits must find exactly the
 // entry a linear search of the routed leaf finds, including among several
 // candidates.
 func TestDescendBits(t *testing.T) {
@@ -82,7 +82,16 @@ func checkDescent[K Key](t *testing.T, root *node[K, uint64], key K, exits map[s
 	p := probeOf(key)
 	leaf := root
 	for leaf.branch != nil {
+		if (p.bits^leaf.low)&leaf.mask != 0 {
+			exits["outside"]++
+		}
+		if lo, hi := leaf.bounds(p); lo < hi {
+			exits["collision"]++
+		}
 		leaf = leaf.route(p)
+	}
+	if (p.bits^leaf.low)&leaf.mask != 0 {
+		exits["outside"]++
 	}
 	var want *entry[K, uint64]
 	for i := range leaf.count {
@@ -115,38 +124,17 @@ func checkDescent[K Key](t *testing.T, root *node[K, uint64], key K, exits map[s
 		if bounds[0] != wantBounds {
 			t.Fatalf("key %v: batch bounds %x, want %x", key, bounds[0], wantBounds)
 		}
-		h, lo, hi, done := descendBits(&root.header, p.bits, search)
+		h, lo, hi := descendBits(&root.header, p.bits, p.bits^raw, search)
 		got := nodeOf[K, uint64](h)
-		n := root
-		for {
-			if (p.bits^n.low)&n.mask != 0 {
-				exits["outside"]++
-			}
-			if n == got {
-				break
-			}
-			if n.branch == nil {
-				t.Fatalf("key %v: descent left the route", key)
-			}
-			n = n.route(p)
+		if got != leaf {
+			t.Fatalf("key %v: descent did not reach the routed leaf", key)
 		}
-		switch {
-		case n.branch != nil:
-			if done || lo != 0 || hi != 0 {
-				t.Fatalf("key %v: internal stop returned done %v [%d, %d)", key, done, lo, hi)
-			}
-			if wlo, whi := n.bounds(p); whi == wlo {
-				t.Fatalf("key %v: stopped without a window collision", key)
-			}
-			exits["collision"]++
-		case !done:
-			t.Fatalf("key %v: leaf not done", key)
-		case search:
-			if wlo, whi := n.bounds(p); lo != wlo || hi != whi {
+		if search {
+			if wlo, whi := leaf.bounds(p); lo != wlo || hi != whi {
 				t.Fatalf("key %v: leaf range [%d, %d), want [%d, %d)", key, lo, hi, wlo, whi)
 			}
 			exits["search"]++
-		default:
+		} else {
 			if lo != 0 || hi != 0 {
 				t.Fatalf("key %v: leaf without search returned [%d, %d)", key, lo, hi)
 			}
@@ -181,11 +169,7 @@ func TestDescendHeaderKeepsNodeAlive(t *testing.T) {
 				e = getBits(&m.root.header, key, key, entries, unsafe.Sizeof(page.leaf.entries[0]))
 				return
 			}
-			var done bool
-			h, _, _, done = descendBits(&m.root.header, key, round%3 == 1)
-			if !done {
-				t.Fatal("descent stopped early")
-			}
+			h, _, _ = descendBits(&m.root.header, key, 0, round%3 == 1)
 		}()
 		var sink [][]byte
 		for i := range 4096 {

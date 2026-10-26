@@ -231,8 +231,8 @@ loop:
 // descendBits requires AVX-512 and BMI2. A node's branch pointer is the word
 // 16 bytes before its header; children start the branch payload, and each
 // child's header is 16 bytes into the child. TestNodeLayout checks this.
-// It returns the header of the node where it stopped, a pointer into that
-// node's allocation. With search set, it also returns the equal range of the
+// It returns the leaf's header, a pointer into that node's allocation.
+// With search set, it also returns the equal range of the
 // window at a leaf; otherwise it prefetches the leaf. The leaf pointer
 // precedes the header. The function has no safe points, so the GC never
 // observes the interior pointers it holds in registers.
@@ -262,12 +262,16 @@ loop:
 	KMOVQ K3, CX \
 	BZHIQ R8, SI, SI
 
-TEXT ·descendBits(SB), NOSPLIT, $0-49
+// Numeric separators are raw eight-byte keys at this branch offset.
+// TestNodeLayout checks both signed and unsigned instantiations.
+#define BRANCH_KEYS 520
+
+TEXT ·descendBits(SB), NOSPLIT, $0-56
 	PCALIGN $64
 	MOVQ h+0(FP), AX
 	MOVQ bits+8(FP), BX
-	MOVQ $0, lo+32(FP)
-	MOVQ $0, hi+40(FP)
+	MOVQ $0, lo+40(FP)
+	MOVQ $0, hi+48(FP)
 	XORL R11, R11
 	MOVQ -16(AX), DX
 	TESTQ DX, DX
@@ -281,9 +285,8 @@ internal:
 	JNE outside
 	WINDOW
 	POPCNTQ SI, SI
-	// A window collision needs full separator comparisons in Go.
 	BZHIQ R8, CX, CX
-	JNE stop
+	JNE tie
 
 step:
 	MOVQ (DX)(SI*8), AX
@@ -293,7 +296,7 @@ step:
 	JNE internal
 
 leaf:
-	CMPB search+16(FP), $0
+	CMPB search+24(FP), $0
 	JNE search
 	// The caller will lock this leaf. A lock serializes later loads, so
 	// prefetch the leaf's numeric header and column lines and the payload
@@ -316,8 +319,8 @@ search:
 	BZHIQ R8, CX, CX
 	POPCNTQ CX, CX
 	ADDQ SI, CX
-	MOVQ SI, lo+32(FP)
-	MOVQ CX, hi+40(FP)
+	MOVQ SI, lo+40(FP)
+	MOVQ CX, hi+48(FP)
 	JMP done
 
 	// A key outside the node's prefix sorts wholly before or after it.
@@ -331,24 +334,30 @@ leafoutside:
 	XORL SI, SI
 	CMPQ BX, header_low(AX)
 	CMOVQHI R8, SI
-	MOVQ SI, lo+32(FP)
-	MOVQ SI, hi+40(FP)
+	MOVQ SI, lo+40(FP)
+	MOVQ SI, hi+48(FP)
 
 done:
-	MOVB $1, done+48(FP)
-	JMP out
-
-stop:
-	MOVB $0, done+48(FP)
-
-out:
-	MOVQ AX, node+24(FP)
+	MOVQ AX, node+32(FP)
 	VZEROUPPER
 	RET
 
-// Numeric separators are raw eight-byte keys at this branch offset.
-// TestNodeLayout checks both signed and unsigned instantiations.
-#define BRANCH_KEYS 520
+	// Routing keys are immutable even for ConcurrentMap. Equality routes
+	// right; only a separator strictly greater than the key stops this walk.
+tie:
+	POPCNTQ CX, CX
+	MOVQ sign+16(FP), R9
+	LEAQ BRANCH_KEYS(DX)(SI*8), R10
+separator:
+	MOVQ (R10), R12
+	XORQ R9, R12
+	CMPQ R12, BX
+	JHI step
+	INCQ SI
+	ADDQ $8, R10
+	DECQ CX
+	JNE separator
+	JMP step
 
 // descendBatch has no calls or local frame. All 32 typed result slots are
 // initialized, including unused lanes. Leaf data requires search=true.

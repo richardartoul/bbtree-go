@@ -16,7 +16,7 @@ func wideBounds(high, low *[capacity]uint16, target uint32, count int) (int, int
 
 const fastDescent = false
 
-func descendBits(*header, uint64, bool) (node *header, lo, hi int, done bool) {
+func descendBits(*header, uint64, uint64, bool) (node *header, lo, hi int) {
 	panic("unreachable")
 }
 

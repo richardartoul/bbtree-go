@@ -9,13 +9,12 @@ var hasAVX512 = avx512Supported()
 // fastDescent selects the assembly descent for numeric keys.
 var fastDescent = hasAVX512
 
-// descendBits routes ordered key bits down from h through internal nodes
-// without window collisions. It returns the header of the node where it
-// stopped; done reports that the node is a leaf, otherwise Go routes it. With
-// search set, it also returns the leaf's equal range [lo, hi) for the window;
-// only callers that own the leaf may set it. It is not marked noescape: the
-// result may alias h or point into another node reached from h.
-func descendBits(h *header, bits uint64, search bool) (node *header, lo, hi int, done bool)
+// descendBits routes ordered key bits down from h to a leaf, resolving
+// separator collisions with raw key words XOR sign. With search set, it also
+// returns the leaf's equal window range [lo, hi); only callers owning the leaf
+// may set it. It is not noescape: the result may alias h or point into another
+// node reached from h.
+func descendBits(h *header, bits, sign uint64, search bool) (node *header, lo, hi int)
 
 // getBits returns the entry of raw key word raw, with ordered bits, below h,
 // or nil. The caller must own the tree or pass an already locked leaf.

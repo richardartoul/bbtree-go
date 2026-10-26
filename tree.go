@@ -446,16 +446,13 @@ func (n *node[K, V]) route(p probe[K]) *node[K, V] {
 }
 
 // descend routes numeric keys through internal levels in one assembly call
-// when available. Window collisions and other architectures use route.
+// when available. Other architectures and race builds use route.
 func descend[K Key, V any](n *node[K, V], p probe[K]) *node[K, V] {
 	if n != nil && p.numeric && fastDescent && !raceEnabled {
-		for n.branch != nil {
-			h, _, _, done := descendBits(&n.header, p.bits, false)
-			n = nodeOf[K, V](h)
-			if done {
-				return n
-			}
-			n = n.route(p)
+		if n.branch != nil {
+			_, raw, _ := numericBits(p.key)
+			h, _, _ := descendBits(&n.header, p.bits, p.bits^raw, false)
+			return nodeOf[K, V](h)
 		}
 		return n
 	}
@@ -520,21 +517,16 @@ func (m *Map[K, V]) Get(key K) (V, bool) {
 
 // seek returns the leaf p routes to, or nil if the map is empty, and the
 // range of entries there whose windows equal p's. For numeric keys, one
-// assembly call usually routes to the leaf and searches its column.
+// assembly call routes to the leaf and searches its column.
 func (m *Map[K, V]) seek(p probe[K]) (n *node[K, V], lo, hi int) {
 	n = m.root
 	if n == nil {
 		return
 	}
 	if p.numeric && fastDescent {
-		for {
-			h, lo, hi, done := descendBits(&n.header, p.bits, true)
-			n = nodeOf[K, V](h)
-			if done {
-				return n, lo, hi
-			}
-			n = n.route(p)
-		}
+		_, raw, _ := numericBits(p.key)
+		h, lo, hi := descendBits(&n.header, p.bits, p.bits^raw, true)
+		return nodeOf[K, V](h), lo, hi
 	}
 	n = descend(n, p)
 	lo, hi = n.bounds(p)
