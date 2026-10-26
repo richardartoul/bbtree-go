@@ -145,7 +145,9 @@ func testHintInvalidation[K bbtree.Key](t *testing.T, key func(int) K) {
 		for i := 0; i < 4096; i++ {
 			m.Set(key(i*8), int64(i))
 		}
-		m.GetHint(key(100*8), &hint)
+		for range 3 {
+			m.SetHint(key(100*8), 100, &hint)
+		}
 		staleWrite := hint
 		// These local splits shrink the saved leaf's upper bound without
 		// growing the root. A cached upper bound must not authorize access.
@@ -186,6 +188,34 @@ func testHintInvalidation[K bbtree.Key](t *testing.T, key func(int) K) {
 		if v, ok := m.SetHint(key(1), 701, &hint); !ok || v != 700 {
 			t.Fatalf("%T replacement: (%d,%v)", m, v, ok)
 		}
+		for range 3 {
+			m.GetHint(key(1), &hint)
+		}
+		// Insert and remove an earlier entry without touching the hint.
+		m.Set(key(0), 501)
+		if v, ok := m.GetHint(key(1), &hint); !ok || v != 701 {
+			t.Fatalf("%T shifted slot: (%d,%v)", m, v, ok)
+		}
+		m.Delete(key(0))
+		if v, ok := m.SetHint(key(1), 702, &hint); !ok || v != 701 {
+			t.Fatalf("%T shifted write: (%d,%v)", m, v, ok)
+		}
+		// A cleared entry's zero key is not a live entry, even if a hint
+		// remembers that slot. Check reads and writes with separate stale hints.
+		var zero K
+		m.Set(zero, 803)
+		for range 3 {
+			m.GetHint(zero, &hint)
+		}
+		staleWrite = hint
+		m.Delete(zero)
+		if v, ok := m.GetHint(zero, &hint); ok || v != 0 {
+			t.Fatalf("%T deleted zero: (%d,%v)", m, v, ok)
+		}
+		if v, ok := m.SetHint(zero, 804, &staleWrite); ok || v != 0 {
+			t.Fatalf("%T reinsert zero: (%d,%v)", m, v, ok)
+		}
+		m.Delete(zero)
 	}
 	// Rebuild and discard trees without resetting their outstanding hints.
 	a.SetHint(key(1), 17, &hint)
@@ -221,6 +251,32 @@ func testHintInvalidation[K bbtree.Key](t *testing.T, key func(int) K) {
 	a.SetHint(key(11), 3, &hint)
 	if v, ok := a.GetHint(key(11), &hint); !ok || v != 3 || a.Len() != 2 {
 		t.Fatalf("append after deleting cached minimum: (%d,%v), Len=%d", v, ok, a.Len())
+	}
+}
+
+func TestHintedWindowMisses(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("concurrent=%t", concurrent), func(t *testing.T) {
+			var m hintedOrderedMap[string] = new(bbtree.Map[string, int64])
+			if concurrent {
+				m = new(bbtree.ConcurrentMap[string, int64])
+			}
+			m.Set("aaaa/000", 10)
+			m.Set("aaaa/100", 20)
+			var hint bbtree.Hint[string, int64]
+			for range 3 {
+				if v, ok := m.GetHint("aaaa/000", &hint); !ok || v != 10 {
+					t.Fatalf("present: (%d,%v)", v, ok)
+				}
+			}
+			// Equal windows do not imply equal full keys: both the prefix
+			// and zero-padded suffix can differ from an existing entry.
+			for _, key := range []string{"bbbb/000", "bbbb/100", "aaaa/000\x00", "aaaa/00"} {
+				if v, ok := m.GetHint(key, &hint); ok || v != 0 {
+					t.Fatalf("absent %q: (%d,%v)", key, v, ok)
+				}
+			}
+		})
 	}
 }
 

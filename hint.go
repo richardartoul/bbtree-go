@@ -17,19 +17,29 @@ type Hint[K Key, V any] struct {
 	hasHigh bool
 	misses  uint8
 	skip    uint8
+	slot    uint8
 }
 
 // Reset forgets the cached leaf and releases the hint's references.
 func (h *Hint[K, V]) Reset() { *h = Hint[K, V]{} }
 
 // Sixteen consecutive misses indicate little locality. Sample again after 128
-// ordinary writes so a random stream does not pay to refresh every hint.
+// ordinary operations so a random stream does not pay to refresh every hint.
 func (h *Hint[K, V]) miss() {
 	h.misses++
 	if h.misses == 16 {
 		h.misses = 0
 		h.skip = 128
 	}
+}
+
+// The low six bits hold a slot. The next bit enables probing it after two
+// searches select the same slot, avoiding payload reads on clustered streams.
+func (h *Hint[K, V]) cacheSlot(i uint8) {
+	if h.slot&(capacity-1) == i {
+		i |= capacity
+	}
+	h.slot = i
 }
 
 // remember requires exclusive ownership of the map or a lock on n's leaf.
@@ -53,27 +63,67 @@ func (h *Hint[K, V]) remember(root, n *node[K, V], cacheHigh bool) {
 	}
 }
 
+// search records the slot found by a full leaf search. The caller owns the
+// leaf or holds its lock; the saved slot is checked again before every use.
+func (h *Hint[K, V]) search(n *node[K, V], p probe[K]) (V, bool) {
+	var lo, hi int
+	// Full-key equality below rejects different prefixes. Exact lookup does
+	// not need the prefix checks that insertion needs for a correct rank.
+	if p.numeric {
+		lo, hi = inlineBounds(&n.inline, uint16(p.bits<<(8*uint(n.prefix))>>48), n.count)
+	} else {
+		var w uint32
+		if k, ok := any(p.key).(string); ok {
+			w = window4(k, n.prefix)
+		}
+		lo, hi = wideBounds(&n.inline, &n.inlineLow, w, n.count)
+	}
+	i := lo
+	if hi-lo > 1 {
+		i = n.narrow(p.key, lo, hi)
+	}
+	if i < hi && n.entries()[i].key == p.key {
+		h.cacheSlot(uint8(i))
+		return n.entries()[i].value, true
+	}
+	h.slot &= capacity - 1
+	var zero V
+	return zero, false
+}
+
 // GetHint is Get with a caller-owned leaf hint. A nil hint is equivalent to Get.
 // Splits, Clear, Compact and reuse with another map are handled automatically.
+// Sustained cache misses temporarily fall back to ordinary Get.
 func (m *Map[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	if hint == nil {
 		return m.Get(key)
 	}
+	if hint.skip != 0 {
+		hint.skip--
+		return m.Get(key)
+	}
 	n := hint.leaf
 	if hint.root != m.root || n == nil || key < hint.low || n.leaf.hasHigh && key >= n.leaf.high {
+		if n != nil {
+			hint.miss()
+		}
 		n, lo, hi := m.seek(probeOf(key))
 		hint.remember(m.root, n, false)
 		if lo < hi {
 			if hi-lo > 1 {
-				return n.collision(key, lo, hi)
+				lo = n.narrow(key, lo, hi)
 			}
-			if e := &n.entries()[lo]; e.key == key {
+			if lo < hi && n.entries()[lo].key == key {
+				hint.cacheSlot(uint8(lo))
+				e := &n.entries()[lo]
 				return e.value, true
 			}
 		}
+		hint.slot &= capacity - 1
 		var zero V
 		return zero, false
 	}
+	hint.misses = 0
 	bits, raw, numeric := numericBits(key)
 	if numeric && fastDescent {
 		if e := n.numericEntry(bits, raw); e != nil {
@@ -82,7 +132,12 @@ func (m *Map[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 		var zero V
 		return zero, false
 	}
-	return n.lookup(probe[K]{key, bits, numeric})
+	if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
+		if e := &n.entries()[i]; e.key == key {
+			return e.value, true
+		}
+	}
+	return hint.search(n, probe[K]{key, bits, numeric})
 }
 
 // SetHint is Set with a caller-owned leaf hint. A nil hint is equivalent to Set.
@@ -117,6 +172,13 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 	cached := hint.root == m.root && n != nil && key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high)
 	if cached {
 		hint.misses = 0
+		if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
+			if e := &n.entries()[i]; e.key == key {
+				old := e.value
+				e.value = value
+				return old, true
+			}
+		}
 		lo, hi = n.bounds(p)
 	} else {
 		if n != nil {
@@ -134,6 +196,7 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		if !cached {
 			hint.remember(m.root, n, false)
 		}
+		hint.cacheSlot(uint8(i))
 		return old, true
 	}
 	if hi-lo == 1 && n.entries()[i].key < key {
@@ -145,6 +208,7 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		if !cached {
 			hint.remember(m.root, n, false)
 		}
+		hint.cacheSlot(uint8(i))
 		var zero V
 		return zero, false
 	}
@@ -157,8 +221,13 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 // GetHint is Get with a caller-owned leaf hint. A nil hint is equivalent to Get.
 // The destination leaf is still locked. Do not share a hint across concurrent
 // calls; use a separate hint per goroutine.
+// Sustained cache misses temporarily fall back to ordinary Get.
 func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	if hint == nil {
+		return m.Get(key)
+	}
+	if hint.skip != 0 {
+		hint.skip--
 		return m.Get(key)
 	}
 	bits, raw, numeric := numericBits(key)
@@ -175,8 +244,13 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 		n = nil
 	}
 	if n == nil {
+		if hint.leaf != nil {
+			hint.miss()
+		}
 		n = readLeaf(descend(root, p), key)
 		hint.remember(root, n, numeric)
+	} else {
+		hint.misses = 0
 	}
 	if n != nil {
 		var value V
@@ -186,7 +260,14 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 				value, ok = e.value, true
 			}
 		} else {
-			value, ok = n.lookup(p)
+			if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
+				if e := &n.entries()[i]; e.key == key {
+					value := e.value
+					n.leaf.mu.RUnlock()
+					return value, true
+				}
+			}
+			value, ok = hint.search(n, p)
 		}
 		n.leaf.mu.RUnlock()
 		return value, ok
@@ -228,6 +309,14 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 		n = writeLeaf(descend(root, p), key)
 	} else {
 		hint.misses = 0
+		if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
+			if e := &n.entries()[i]; e.key == key {
+				old := e.value
+				e.value = value
+				n.leaf.mu.Unlock()
+				return old, true
+			}
+		}
 	}
 	if n != nil {
 		lo, hi := n.bounds(p)
@@ -241,6 +330,7 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 			if !cached {
 				hint.remember(root, n, p.numeric)
 			}
+			hint.cacheSlot(uint8(i))
 			n.leaf.mu.Unlock()
 			return old, true
 		}
@@ -252,6 +342,7 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 			if !cached {
 				hint.remember(root, n, p.numeric)
 			}
+			hint.cacheSlot(uint8(i))
 			n.leaf.mu.Unlock()
 			var zero V
 			return zero, false
