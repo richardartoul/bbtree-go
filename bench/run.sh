@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cache="${BBTREE_BENCH_CACHE:-/tmp/kirk-bbtree-bench}"
+cache="${BBTREE_BENCH_CACHE:-/tmp/bbtree-go-bench}"
 revision=8adae97a0ed97e5c98fa2790312eb0aec9719846
 mkdir -p "$cache/reference/src"
 if [[ ! -d "$cache/upstream/.git" ]]; then
