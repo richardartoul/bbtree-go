@@ -46,8 +46,9 @@ func (h *Hint[K, V]) cacheSlot(i uint8) {
 // The anchor is a conservative lower fence: it is a key from this leaf, and
 // splits reset it before shrinking the interval. Deletion and insertion can
 // make it stale but cannot move it below the leaf's routing interval. The saved
-// upper bound only rejects misses without accessing the leaf; accepting a hint
-// still requires checking the live high fence.
+// upper bound only rejects misses without accessing the leaf. Searching or
+// inserting requires checking the live high fence; a matching live entry
+// already proves membership in the leaf.
 // Only concurrent numeric paths cache the upper bound: string comparisons are
 // too expensive to repeat before and after locking.
 func (h *Hint[K, V]) remember(root, n *node[K, V], cacheHigh bool) {
@@ -103,41 +104,47 @@ func (m *Map[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 		return m.Get(key)
 	}
 	n := hint.leaf
-	if hint.root != m.root || n == nil || key < hint.low || n.leaf.hasHigh && key >= n.leaf.high {
-		if n != nil {
-			hint.miss()
-		}
-		n, lo, hi := m.seek(probeOf(key))
-		hint.remember(m.root, n, false)
-		if lo < hi {
-			if hi-lo > 1 {
-				lo = n.narrow(key, lo, hi)
+	if hint.root == m.root && n != nil {
+		if hint.slot >= capacity {
+			if i := int(hint.slot & (capacity - 1)); i < n.count {
+				if e := &n.entries()[i]; e.key == key {
+					hint.misses = 0
+					return e.value, true
+				}
 			}
-			if lo < hi && n.entries()[lo].key == key {
-				hint.cacheSlot(uint8(lo))
-				e := &n.entries()[lo]
-				return e.value, true
-			}
+			hint.slot &= capacity - 1
 		}
-		hint.slot &= capacity - 1
-		var zero V
-		return zero, false
+		if key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high) {
+			hint.misses = 0
+			bits, raw, numeric := numericBits(key)
+			if numeric && fastDescent {
+				if e := n.numericEntry(bits, raw); e != nil {
+					return e.value, true
+				}
+				var zero V
+				return zero, false
+			}
+			return hint.search(n, probe[K]{key, bits, numeric})
+		}
 	}
-	hint.misses = 0
-	bits, raw, numeric := numericBits(key)
-	if numeric && fastDescent {
-		if e := n.numericEntry(bits, raw); e != nil {
+	if n != nil {
+		hint.miss()
+	}
+	n, lo, hi := m.seek(probeOf(key))
+	hint.remember(m.root, n, false)
+	if lo < hi {
+		if hi-lo > 1 {
+			lo = n.narrow(key, lo, hi)
+		}
+		if lo < hi && n.entries()[lo].key == key {
+			hint.cacheSlot(uint8(lo))
+			e := &n.entries()[lo]
 			return e.value, true
 		}
-		var zero V
-		return zero, false
 	}
-	if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
-		if e := &n.entries()[i]; e.key == key {
-			return e.value, true
-		}
-	}
-	return hint.search(n, probe[K]{key, bits, numeric})
+	hint.slot &= capacity - 1
+	var zero V
+	return zero, false
 }
 
 // SetHint is Set with a caller-owned leaf hint. A nil hint is equivalent to Set.
@@ -151,13 +158,26 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		hint.skip--
 		return m.Set(key, value)
 	}
+	n := hint.leaf
+	valid := hint.root == m.root && n != nil
+	// A matching live entry proves membership without comparing fences.
+	if valid && hint.slot >= capacity {
+		if i := int(hint.slot & (capacity - 1)); i < n.count {
+			if e := &n.entries()[i]; e.key == key {
+				hint.misses = 0
+				old := e.value
+				e.value = value
+				return old, true
+			}
+		}
+		hint.slot &= capacity - 1
+	}
 	if m.root == nil {
 		old, replaced := m.Set(key, value)
 		hint.remember(m.root, m.root, false)
 		return old, replaced
 	}
 	p := probeOf(key)
-	n := hint.leaf
 	// Avoid touching the unrelated last leaf when a clustered hint is active.
 	// An empty hint can still use the map's own rightmost-leaf append cache.
 	if n == nil || n == m.last {
@@ -169,16 +189,9 @@ func (m *Map[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool) {
 		}
 	}
 	var lo, hi int
-	cached := hint.root == m.root && n != nil && key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high)
+	cached := valid && key >= hint.low && (!n.leaf.hasHigh || key < n.leaf.high)
 	if cached {
 		hint.misses = 0
-		if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
-			if e := &n.entries()[i]; e.key == key {
-				old := e.value
-				e.value = value
-				return old, true
-			}
-		}
 		lo, hi = n.bounds(p)
 	} else {
 		if n != nil {
@@ -236,6 +249,17 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 	n := hint.leaf
 	if hint.root == root && n != nil && key >= hint.low && (!hint.hasHigh || key < hint.high) {
 		n.leaf.mu.RLock()
+		if hint.slot >= capacity {
+			if i := int(hint.slot & (capacity - 1)); i < n.count {
+				if e := &n.entries()[i]; e.key == key {
+					hint.misses = 0
+					value := e.value
+					n.leaf.mu.RUnlock()
+					return value, true
+				}
+			}
+			hint.slot &= capacity - 1
+		}
 		if n.leaf.hasHigh && key >= n.leaf.high {
 			n.leaf.mu.RUnlock()
 			n = nil
@@ -260,13 +284,6 @@ func (m *ConcurrentMap[K, V]) GetHint(key K, hint *Hint[K, V]) (V, bool) {
 				value, ok = e.value, true
 			}
 		} else {
-			if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
-				if e := &n.entries()[i]; e.key == key {
-					value := e.value
-					n.leaf.mu.RUnlock()
-					return value, true
-				}
-			}
 			value, ok = hint.search(n, p)
 		}
 		n.leaf.mu.RUnlock()
@@ -294,6 +311,17 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 	cached := hint.root == root && n != nil && key >= hint.low && (!hint.hasHigh || key < hint.high)
 	if cached {
 		leafOf(n).mu.Lock()
+		// A matching live entry proves membership before the high-fence
+		// check: splits remove moved entries under this same lock.
+		if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
+			if e := &n.entries()[i]; e.key == key {
+				hint.misses = 0
+				old := e.value
+				e.value = value
+				n.leaf.mu.Unlock()
+				return old, true
+			}
+		}
 		if n.leaf.hasHigh && key >= n.leaf.high {
 			n.leaf.mu.Unlock()
 			n = nil
@@ -309,14 +337,6 @@ func (m *ConcurrentMap[K, V]) SetHint(key K, value V, hint *Hint[K, V]) (V, bool
 		n = writeLeaf(descend(root, p), key)
 	} else {
 		hint.misses = 0
-		if i := int(hint.slot & (capacity - 1)); hint.slot >= capacity && i < n.count {
-			if e := &n.entries()[i]; e.key == key {
-				old := e.value
-				e.value = value
-				n.leaf.mu.Unlock()
-				return old, true
-			}
-		}
 	}
 	if n != nil {
 		lo, hi := n.bounds(p)
